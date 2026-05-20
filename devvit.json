@@ -1,0 +1,53 @@
+{
+  "$schema": "https://developers.reddit.com/schema/config-file.v1.json",
+  "name": "mod-sentinel",
+  "server": {
+    "dir": "dist/server",
+    "entry": "index.cjs"
+  },
+  "menu": {
+    "items": [
+      {
+        "label": "Mop comments",
+        "description": "Remove this comment and all child comments.",
+        "location": "comment",
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/mop-comment"
+      },
+      {
+        "label": "Mop post comments",
+        "description": "Remove all comments of this post.",
+        "location": "post",
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/mop-post"
+      },
+      {
+        "label": "🛡️ SentinelMod - Ver salud del equipo",
+        "description": "Ver el panel de salud y burnout de los moderadores.",
+        "location": "subreddit",
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/sentinel-dashboard"
+      }
+    ]
+  },
+  "forms": {
+    "mopComment": "/internal/form/mop-comment-submit",
+    "mopPost": "/internal/form/mop-post-submit",
+    "sentinelDashboard": "/internal/form/sentinel-dashboard-submit",
+    "sentinelResults": "/internal/form/sentinel-dashboard-submit"
+  },
+  "triggers": {
+    "onAppInstall": "/internal/triggers/on-app-install",
+    "onModAction": "/internal/triggers/on-mod-action"
+  },
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch"
+  },
+  "permissions": {
+    "reddit": true
+  },
+  "dev": {
+    "subreddit": "mod_sentinel_dev"
+  }
+}
