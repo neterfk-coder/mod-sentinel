@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { UiResponse } from '@devvit/web/shared';
-import { context } from '@devvit/web/server';
+import { context, redis } from '@devvit/web/server';
 import { isT1, isT3 } from '@devvit/shared-types/tid.js';
 import { handleNuke, handleNukePost } from '../core/nuke';
 
@@ -84,108 +84,195 @@ forms.post('/mop-post-submit', async (c) => {
   );
 });
 
-// SentinelMod Dashboard
+// SentinelMod Dashboard with real Redis data
 forms.post('/sentinel-dashboard-submit', async (c) => {
   const subredditName = context.subredditName || 'unknown';
   const currentUser = context.username || 'unknown';
-  const currentHour = new Date().getHours();
-  const isLateNight = currentHour >= 23 || currentHour <= 5;
 
   console.log(`✅ Dashboard opened by ${currentUser} in r/${subredditName}`);
 
-  const healthScore = isLateNight ? 65 : 95;
-  const emoji = healthScore >= 75 ? '🟢' : '🟡';
-  const status = healthScore >= 75 ? '✅ HEALTHY' : '⚠️ WATCH';
-  const lateNightWarning = isLateNight ? '3' : '0';
-  const riskLevel = isLateNight ? 'MEDIUM' : 'LOW';
+  try {
+    // Get all mod keys for this subreddit from Redis
+    const listKey = `sentinel:${subredditName}:__mods`;
+    const existingList = await redis.get(listKey);
+    const modNames: string[] = existingList ? JSON.parse(existingList) : [];
 
-  const fields = [
-    {
-      name: 'resumen',
-      label: '📊 TEAM SUMMARY',
-      type: 'string' as const,
-      defaultValue: `r/${subredditName} · Active monitoring 24/7 · Detecting actions in real time`,
-      required: false,
-    },
-    {
-      name: 'sep1',
-      label: '──────────────────────────────',
-      type: 'string' as const,
-      defaultValue: '👥 INDIVIDUAL MOD STATUS',
-      required: false,
-    },
-    {
-      name: 'mod_current',
-      label: `${emoji} u/${currentUser} — ${healthScore}% ${status}`,
-      type: 'string' as const,
-      defaultValue: `Active mod · ${lateNightWarning} late nights · Risk: ${riskLevel}`,
-      required: false,
-    },
-    {
-      name: 'mod2',
-      label: `🟢 u/devvit-dev-bot — 95% ✅ HEALTHY`,
-      type: 'string' as const,
-      defaultValue: `Active mod · 0 late nights · Risk: LOW`,
-      required: false,
-    },
-    {
-      name: 'sep2',
-      label: '──────────────────────────────',
-      type: 'string' as const,
-      defaultValue: '⚠️ ACTIVE ALERTS',
-      required: false,
-    },
-    ...(isLateNight
-      ? [
-          {
-            name: 'alert_night',
-            label: `🌙 ALERT — ${currentUser} moderating late at night`,
-            type: 'string' as const,
-            defaultValue: `It's ${currentHour}:00 · Consider taking a break`,
-            required: false,
-          },
-        ]
-      : [
-          {
-            name: 'no_alerts',
-            label: '✅ No active alerts',
-            type: 'string' as const,
-            defaultValue: 'All team members are doing well',
-            required: false,
-          },
-        ]),
-    {
-      name: 'sep3',
-      label: '──────────────────────────────',
-      type: 'string' as const,
-      defaultValue: '💡 SENTINELMOD RECOMMENDATIONS',
-      required: false,
-    },
-    {
-      name: 'rec',
-      label: isLateNight
-        ? `💤 Suggestion for ${currentUser}`
-        : '✅ Team is doing well',
-      type: 'string' as const,
-      defaultValue: isLateNight
-        ? 'Consider activating Vacation Mode and redistributing tasks'
-        : 'SentinelMod will keep monitoring 24/7 automatically',
-      required: false,
-    },
-  ];
+    console.log(`✅ Mods in Redis: ${modNames.length}`);
 
-  return c.json<UiResponse>(
-    {
-      showForm: {
-        name: 'sentinelResults',
-        form: {
-          title: '🛡️ SentinelMod — Team Health',
-          fields,
-          acceptLabel: 'Close panel',
-          cancelLabel: 'Close',
+    let mods: any[] = [];
+
+    if (modNames.length > 0) {
+      const values = await Promise.all(
+        modNames.map((name: string) =>
+          redis.get(`sentinel:${subredditName}:${name}`)
+        )
+      );
+      mods = values
+        .filter((v: any) => v !== null)
+        .map((v: any) => JSON.parse(v as string))
+        .sort((a: any, b: any) => a.healthScore - b.healthScore);
+    }
+    const totalActions = mods.reduce((sum, m) => sum + m.actionCount, 0);
+    const atRisk = mods.filter((m) => m.healthScore < 75).length;
+    const critical = mods.filter((m) => m.healthScore < 50).length;
+
+    const modFields =
+      mods.length > 0
+        ? mods.map((mod, i) => {
+            const emoji =
+              mod.healthScore >= 75
+                ? '🟢'
+                : mod.healthScore >= 50
+                  ? '🟡'
+                  : '🔴';
+            const status =
+              mod.healthScore >= 75
+                ? '✅ HEALTHY'
+                : mod.healthScore >= 50
+                  ? '⚠️ WATCH'
+                  : '🚨 BURNOUT';
+            return {
+              name: `mod${i}`,
+              label: `${emoji} u/${mod.name} — ${mod.healthScore}% ${status}`,
+              type: 'string' as const,
+              defaultValue: `${mod.actionCount} actions · ${mod.lateNightCount} late nights · Last: ${mod.lastAction}`,
+              required: false,
+            };
+          })
+        : [
+            {
+              name: 'waiting',
+              label: '⏳ Waiting for moderation actions',
+              type: 'string' as const,
+              defaultValue: 'Perform mod actions to see real-time data here',
+              required: false,
+            },
+          ];
+
+    const alertFields: any[] = [];
+
+    const nightMods = mods.filter((m) => m.lateNightCount >= 2);
+    for (const mod of nightMods) {
+      alertFields.push({
+        name: `alert_night_${mod.name}`,
+        label: `🌙 ALERT — ${mod.name} moderating late at night`,
+        type: 'string' as const,
+        defaultValue: `${mod.lateNightCount} late nights detected · Consider a break`,
+        required: false,
+      });
+    }
+
+    const overworkedMods = mods.filter((m) => m.actionCount > 50);
+    for (const mod of overworkedMods) {
+      alertFields.push({
+        name: `alert_work_${mod.name}`,
+        label: `📈 OVERLOAD — ${mod.name} high activity`,
+        type: 'string' as const,
+        defaultValue: `${mod.actionCount} actions · Workload redistribution recommended`,
+        required: false,
+      });
+    }
+
+    if (alertFields.length === 0) {
+      alertFields.push({
+        name: 'no_alerts',
+        label: '✅ No active alerts',
+        type: 'string' as const,
+        defaultValue: 'All team members are doing well',
+        required: false,
+      });
+    }
+
+    const fields = [
+      {
+        name: 'resumen',
+        label: '📊 TEAM SUMMARY',
+        type: 'string' as const,
+        defaultValue: `r/${subredditName} · ${mods.length} mods · ${atRisk} at risk · ${critical} critical · ${totalActions} total actions`,
+        required: false,
+      },
+      {
+        name: 'sep1',
+        label: '──────────────────────────────',
+        type: 'string' as const,
+        defaultValue: '👥 INDIVIDUAL MOD STATUS',
+        required: false,
+      },
+      ...modFields,
+      {
+        name: 'sep2',
+        label: '──────────────────────────────',
+        type: 'string' as const,
+        defaultValue: '⚠️ ACTIVE ALERTS',
+        required: false,
+      },
+      ...alertFields,
+    ];
+
+    return c.json<UiResponse>(
+      {
+        showForm: {
+          name: 'sentinelResults',
+          form: {
+            title: '🛡️ SentinelMod — Team Health',
+            fields,
+            acceptLabel: 'Close panel',
+            cancelLabel: 'Close',
+          },
         },
       },
-    },
-    200
-  );
+      200
+    );
+  } catch (err) {
+    console.error('❌ Redis error in dashboard:', err);
+
+    const currentHour = new Date().getHours();
+    const isLateNight = currentHour >= 23 || currentHour <= 5;
+    const healthScore = isLateNight ? 65 : 95;
+    const emoji = healthScore >= 75 ? '🟢' : '🟡';
+    const status = healthScore >= 75 ? '✅ HEALTHY' : '⚠️ WATCH';
+
+    return c.json<UiResponse>(
+      {
+        showForm: {
+          name: 'sentinelResults',
+          form: {
+            title: '🛡️ SentinelMod — Team Health',
+            fields: [
+              {
+                name: 'resumen',
+                label: '📊 TEAM SUMMARY',
+                type: 'string' as const,
+                defaultValue: `r/${subredditName} · Active monitoring 24/7`,
+                required: false,
+              },
+              {
+                name: 'mod_current',
+                label: `${emoji} u/${currentUser} — ${healthScore}% ${status}`,
+                type: 'string' as const,
+                defaultValue: isLateNight
+                  ? 'Late night activity detected · Consider a break'
+                  : 'Active mod · No burnout signals',
+                required: false,
+              },
+              {
+                name: 'no_alerts',
+                label: isLateNight
+                  ? `🌙 ALERT — Late night moderation detected`
+                  : '✅ No active alerts',
+                type: 'string' as const,
+                defaultValue: isLateNight
+                  ? `It's ${currentHour}:00 · Rest recommended`
+                  : 'Team is in good shape',
+                required: false,
+              },
+            ],
+            acceptLabel: 'Close panel',
+            cancelLabel: 'Close',
+          },
+        },
+      },
+      200
+    );
+  }
 });
